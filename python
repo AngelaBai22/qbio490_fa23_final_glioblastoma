@@ -1,0 +1,32 @@
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
+
+df = cd38ex
+
+X = df[['CD38']]  
+y = df[['path_diag_to_death_days']]
+
+X['CD38_high'] = (X['CD38'] > X['CD38'].median()).astype(int)
+
+model = LinearRegression().fit(X, y)
+
+print(f"Coefficient for CD38 high vs low: {model.coef_}")
+print(f"Model score: {model.score(X, y)}")
+
+X_high = X[X['CD38_high'] == 1] 
+X_low = X[X['CD38_high'] == 0]
+
+plt.scatter(X_high['CD38'], y[X['CD38_high']==1], c='r', label='High') 
+plt.scatter(X_low['CD38'], y[X['CD38_high']==0], c='b', label='Low')
+
+y_high_pred = model.predict(X_high)
+y_low_pred = model.predict(X_low)
+
+plt.plot(X_high['CD38'], y_high_pred, c='r')
+plt.plot(X_low['CD38'], y_low_pred, c='b') 
+
+plt.legend()
+plt.xlabel('CD38 Expression')
+plt.ylabel('Survival Time')
+plt.show()
