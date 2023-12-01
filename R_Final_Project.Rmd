@@ -1,0 +1,346 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#This file includes all of our code in R!
+```
+
+
+```{r}
+    knitr::opts_knit$set(root.dir = normalizePath("/Users/15713/Desktop/QBio490/qbio_490_angelabai/analysis_data")) 
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(SummarizedExperiment)
+library(DESeq2)
+```
+
+```{r}
+rna_query <- GDCquery(project ="TCGA-GBM",
+data.category = "Transcriptome Profiling",
+data.type = "Gene Expression Quantification",
+workflow.type = "STAR - Counts")
+#GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+```
+
+```{r}
+rna_clinical <- rna_se@colData
+rna_clinical <- as.data.frame(rna_clinical)
+
+rna_genes <- rna_se@rowRanges@elementMetadata
+rna_genes <- as.data.frame(rna_genes)
+
+rna_counts <- rna_se@assays@data$unstranded
+rna_counts <- as.data.frame(rna_counts)
+
+
+treatment_mask <- ifelse(colnames(rna_clinical) == 'treatments', F, T)
+rna_clinical <- rna_clinical[, treatment_mask]
+
+primary_mask <- ifelse(colnames(rna_clinical) == 'primary_site', F, T)
+rna_clinical <- rna_clinical[, primary_mask]
+
+disease_mask <- ifelse(colnames(rna_clinical) == 'disease_type', F, T)
+rna_clinical <- rna_clinical[, disease_mask]
+
+```
+
+```{r}
+#Checking that our gene is available in the dataframe!
+print('CD38' %in% rna_genes$gene_name)
+
+```
+
+```{r}
+#Making row names informative for rna_genes
+rownames(rna_genes) <- rna_genes$gene_id
+
+#Making row and column names informative for rna_counts
+rownames(rna_counts) <- rna_genes$gene_id
+colnames(rna_counts) <- rownames(rna_clinical)
+```
+
+```{r}
+#Getting the name of CD38 gene_id
+cd38_genes <- ifelse(rna_genes$gene_name == "CD38", T, F)
+cd38_genes <- rna_genes[cd38_genes,]
+```
+
+
+```{r}
+#Creating a box plot to identify thresholds for high versus low CD38 expression
+
+#Flipping rna_counts rows and columns so columns can be gene id
+rna_counts_flipped = t(rna_counts)
+
+rna_counts_flipped <- as.data.frame(rna_counts_flipped)
+
+#Results are log scaled
+boxplot(log10(rna_counts_flipped$ENSG00000004468.13),
+        main = "log of CD38 Expression",
+        ylab = "Expression")
+quantile(rna_counts_flipped$ENSG00000004468.13)
+```
+
+
+```{r}
+library(survival)
+library(survminer)
+library(ggplot2)
+```
+
+```{r}
+#Segmenting samples in clinic into two groups- high and low CD38
+
+
+#Converting row names to column
+
+library(tibble)
+low_barcodes <- tibble::rownames_to_column(rna_counts_flipped, "patient")
+
+
+#Filter patient barcodes from rna_counts into low and high
+
+low_barcodes$cd38_expression <- ifelse(rna_counts_flipped$ENSG00000004468.13 <= 388, "Low", ifelse(rna_counts_flipped$ENSG00000004468.13 >= 1348, "High", "Medium"))
+
+
+```
+
+
+```{r}
+#Make a new column in rna_clinical where if patient id from low_barcodes (a flipped version of rna_counts with more informative columns) is in rna_clinical, true
+
+clin_query <- GDCquery(project = "TCGA-GBM",
+data.category = "Clinical",
+data.type = "Clinical Supplement",
+data.format = 'BCR Biotab')
+GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)
+clinic <- clinical.BCRtab.all$clinical_patient_gbm[-c(1,2),]
+
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+
+
+#clinic <- read.csv("C:/Users/15713/Desktop/QBio490/qbio_490_angelabai/analysis_data/gbm_clinical_data.csv")
+
+survival_clinic <- rna_clinical[rna_clinical$patient %in% clinic$Tumor_Sample_Barcode,]
+
+low_barcodes_filtered <- low_barcodes[low_barcodes$patient %in% survival_clinic$barcode,]
+
+survival_clinic$cd38_expression <- ifelse(low_barcodes_filtered$cd38_expression == "Low", "Low", ifelse(low_barcodes_filtered$cd38_expression == "High", "High", "Medium"))
+
+#Remove all medium values
+
+survival_clinic <- survival_clinic[!survival_clinic$cd38_expression == "Medium",]
+
+```
+
+```{r}
+#KM Plotting
+
+#Preprocessing
+
+#FOUND NO NAs
+NA_mask <- ifelse(is.na(survival_clinic$cd38_expression), FALSE, TRUE)
+cleaned_clinical <- survival_clinic[NA_mask, ]
+
+cleaned_clinical$survival_time <- ifelse(cleaned_clinical$days_to_death == "[Not Applicable]", cleaned_clinical$days_to_last_follow_up, cleaned_clinical$days_to_death)
+
+```
+
+```{r}
+#Converting survival time from string to numeric 
+
+cleaned_clinical$survival_time <- as.numeric(cleaned_clinical$survival_time)
+
+#Creating the death event column
+
+cleaned_clinical$death_event <- ifelse(cleaned_clinical$vital_status == "Alive", cleaned_clinical$death_event <- FALSE, cleaned_clinical$death_event <- TRUE)
+
+```
+
+```{r}
+survival_object <- Surv(time = cleaned_clinical$survival_time,
+                        event = cleaned_clinical$death_event)
+
+fit_object <- survfit(survival_object ~ cd38_expression, data = cleaned_clinical)
+```
+
+```{r}
+survplot <- ggsurvplot(fit_object,
+                       pval=TRUE,
+                       ggtheme = theme(plot.margin = unit(c(1,1,1,1), "cm")),
+                       legend = 'right')
+
+KM_plot <- survplot$plot + theme_bw() + theme(axis.title = element_text(size=20), 
+                                              axis.text = element_text(size=16),
+                                              legend.title = element_text(size=14),
+                                              legend.text = element_text(size=12))
+
+KM_plot
+```
+
+
+```{r}
+#Creating the new DESEQ featuring low vs high CD38 instead of tumor type
+
+
+low_barcodes_filtered <- low_barcodes_filtered[!low_barcodes_filtered$cd38_expression == "FALSE",]
+
+#Now, both survival_clinic and low_barcodes_filtered have the same number of rows (removed all samples with medium CD38 expression)
+```
+
+```{r}
+#Factoring categorical variable (CD38 expression)
+
+survival_clinic$cd38_expression <- factor(survival_clinic$cd38_expression, levels=c('High', 'Low'))
+head(survival_clinic$cd38_expression)
+
+```
+
+```{r}
+#Deleting cd38_expression column from low_barcodes_filtered
+low_barcodes_filtered <- subset(low_barcodes_filtered, select = -cd38_expression)
+
+
+#Flipping low_barcodes_filtered again to match DESEQ's required dimensions
+
+low_barcodes_filtered = t(low_barcodes_filtered)
+
+colnames(low_barcodes_filtered)=low_barcodes_filtered[c(1),]
+low_barcodes_filtered=low_barcodes_filtered[-c(1),]
+
+countDataMatrix <- as.matrix(low_barcodes_filtered[ , -1])
+
+survival_clinic_new <- survival_clinic[-c(1), ]
+
+```
+
+
+```{r}
+#Removing the spaces in front of expression values in counts data, because this causes DESEQ to read them as negative 
+
+low_barcodes <- tibble::rownames_to_column(rna_counts_flipped, "patient")
+
+#Filter by barcodes in survival_clinic_new
+countData <- as.data.frame(low_barcodes[low_barcodes$patient %in% survival_clinic$barcode,])
+rownames(countData) <- countData$patient
+countData$patient <- NULL
+
+#Reflipping 
+countData = t(countData)
+
+```
+
+
+```{r}
+#Checking dimensions
+
+ncol(countData)
+ncol(survival_clinic)
+
+nrow(countData)
+nrow(survival_clinic)
+
+```
+
+
+```{r}
+?DESeqDataSetFromMatrix
+dds <- DESeqDataSetFromMatrix(countData = countData,
+                             colData = survival_clinic,
+                             design = ~cd38_expression)
+
+?DESeq
+dds_obj <- DESeq(dds) # note: this will likely take a long time (ie 45 minutes to 2 hours)
+
+?resultsNames
+resultsNames(dds_obj)  # see what comparisons got run
+
+# get the young vs. old comparison
+#?results
+results <- results(dds_obj, format = "DataFrame", contrast = c("cd38_expression", 'High', 'Low')) # this is case sensitive so be careful to match it with your age_category factors closely!
+
+```
+```{r}
+library(EnhancedVolcano)
+
+#Volcano plot
+  EnhancedVolcano(results,
+    lab = rownames(results),
+    x = 'log2FoldChange',
+    y = 'pvalue')
+
+```
+
+```{r}
+#Turning the upregulated and downregulated genes identified by DESEQ into csv files for further analysis in Python!
+
+results <- as.data.frame(results)
+
+#Log2 fold change is below -1 or over 1
+#p-value of less than 0.05
+
+new_results <- results[(results$pvalue < 0.05), ]
+
+results_upregulated <- new_results[(new_results$log2FoldChange > 1), ]
+
+results_downregulated <- new_results[(new_results$log2FoldChange < -1), ]
+
+
+na_mask <- !is.na(results_upregulated$pvalue)
+results_upregulated <- results_upregulated[na_mask, ]
+
+na_mask <- !is.na(results_downregulated$pvalue)
+results_downregulated <- results_downregulated[na_mask, ]
+
+
+results_upregulated_geneid <- tibble::rownames_to_column(results_upregulated, "gene_id")
+
+results_downregulated_geneid <- tibble::rownames_to_column(results_downregulated, "gene_id")
+
+#Convert only the gene ids to csv 
+write.csv(results_upregulated_geneid$gene_id, "C:/Users/15713/Desktop/QBio490/qbio_490_angelabai/upregulated_geneid.csv", row.names = FALSE)
+
+write.csv(results_downregulated_geneid$gene_id, "C:/Users/15713/Desktop/QBio490/qbio_490_angelabai/downregulated_geneid.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+#Creating a lollipop plot to see if mutations are negligible
+
+library(maftools)
+
+```
+
+```{r}
+#Mutation data for GBM
+
+maf_query <- GDCquery(
+project = "TCGA-GBM",
+data.category = "Simple Nucleotide Variation",
+access = "open",
+data.type = "Masked Somatic Mutation",
+workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+GDCdownload(maf_query)
+
+maf <- GDCprepare(maf_query)
+
+maf_object <- read.maf(maf = maf,
+clinicalData = clinic,
+isTCGA = TRUE)
+
+```
+
+```{r}
+lollipopPlot(maf = maf_object,
+             gene = "CD38")
+```
+
+
+
